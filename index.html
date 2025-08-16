@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>VideoCut - Editor de Video Simple</title>
+  <link rel="stylesheet" href="styles.css">
+  <!-- Required security headers -->
+  <meta http-equiv="Cross-Origin-Opener-Policy" content="same-origin">
+  <meta http-equiv="Cross-Origin-Embedder-Policy" content="require-corp">
+</head>
+<body>
+  <header class="app-header">
+    <h1>VideoCut (MVP)</h1>
+  </header>
+
+  <main class="app-main">
+    <section class="controls">
+      <label class="file-picker">
+        <input id="fileInput" type="file" accept="video/*" />
+        <span>📂 Cargar video</span>
+      </label>
+
+      <button id="playPauseBtn" disabled>▶️ Reproducir</button>
+      <button id="knifeBtn" disabled title="Cortar en el playhead actual">✂️ Cortar en playhead</button>
+      <button id="deleteBtn" disabled title="Borrar segmento seleccionado">🗑️ Borrar segmento</button>
+      <button id="exportBtn" disabled title="Exportar a MP4">💾 Exportar MP4</button>
+
+      <div class="slider-group">
+        <label for="zoomRange">Zoom</label>
+        <input id="zoomRange" type="range" min="1" max="12" step="0.5" value="1" disabled />
+        <span id="zoomLabel" class="muted">1.0x</span>
+      </div>
+      <div class="slider-group">
+        <label for="scrollRange">Scroll</label>
+        <input id="scrollRange" type="range" min="0" max="100" step="0.1" value="0" disabled />
+        <span id="scrollLabel" class="muted">0%</span>
+      </div>
+
+      <span class="time-label"><span id="currentTime">0:00</span> / <span id="totalTime">0:00</span></span>
+    </section>
+
+    <section class="viewer">
+      <video id="player" controls preload="metadata"></video>
+    </section>
+
+    <section class="timeline">
+      <canvas id="timelineCanvas" width="1200" height="140"></canvas>
+      <div class="help">
+        <p>
+          - Mueve el playhead en el reproductor; el timeline le seguirá automáticamente.
+          - Pulsa "✂️ Cortar en playhead" para añadir un corte en esa posición.
+          - Haz click entre cortes para seleccionar un segmento. Pulsa 🗑️ para borrarlo.
+          - Usa Zoom y Scroll para navegar videos largos.
+        </p>
+        <div id="exportStatus" class="status-message"></div>
+      </div>
+    </section>
+  </main>
+
+  <!-- Load FFmpeg from CDN -->
+  <script src="https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.10.1/dist/ffmpeg.min.js"></script>
+  <script>
+    // FFmpeg configuration and initialization
+    const { createFFmpeg, fetchFile } = FFmpeg;
+    
+    // Create FFmpeg instance with proper configuration
+    const ffmpeg = createFFmpeg({
+      log: true,
+      logger: ({ type, message }) => console.log(`[FFmpeg ${type}] ${message}`),
+      progress: ({ ratio }) => {
+        const percent = Math.round(ratio * 100);
+        const status = document.getElementById('exportStatus');
+        if (status) {
+          status.textContent = `Procesando: ${percent}%`;
+          status.className = 'status-message visible progress';
+        }
+      },
+      // Use jsdelivr CDN which has proper CORS headers
+      corePath: 'https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.10.0/dist/ffmpeg-core.js',
+      // Single-threaded configuration
+      mainScriptUrlOrBlob: {
+        coreURL: 'https://cdn.jsdelivr.net/npm/@ffmpeg/core-st@0.10.0/dist/ffmpeg-core.js',
+        wasmURL: 'https://cdn.jsdelivr.net/npm/@ffmpeg/core-st@0.10.0/dist/ffmpeg-core.wasm',
+        workerURL: 'https://cdn.jsdelivr.net/npm/@ffmpeg/core-st@0.10.0/dist/ffmpeg-core.worker.js'
+      }
+    });
+
+    // Make ffmpeg instance available globally
+    window.ffmpeg = ffmpeg;
+    window.fetchFile = fetchFile;  // Make fetchFile available globally
+    
+    // Simple function to update status
+    function updateExportStatus(message, type = 'info') {
+      const status = document.getElementById('exportStatus');
+      if (status) {
+        status.textContent = message;
+        status.className = `status-message visible ${type}`;
+      }
+    }
+    
+    // Initialize FFmpeg when needed
+    let isFFmpegLoaded = false;
+    async function ensureFFmpegLoaded() {
+      if (!isFFmpegLoaded) {
+        try {
+          updateExportStatus('Cargando FFmpeg...', 'progress');
+          await ffmpeg.load();
+          isFFmpegLoaded = true;
+          console.log('FFmpeg loaded successfully');
+          updateExportStatus('FFmpeg cargado correctamente', 'success');
+          return true;
+        } catch (error) {
+          console.error('Error loading FFmpeg:', error);
+          updateExportStatus('Error: No se pudo cargar FFmpeg', 'error');
+          return false;
+        }
+      }
+      return true;
+    }
+    
+    // Start loading FFmpeg when the page loads
+    document.addEventListener('DOMContentLoaded', () => {
+      ensureFFmpegLoaded().catch(console.error);
+    });
+  </script>
+  <script src="app.js"></script>
+</body>
+</html>

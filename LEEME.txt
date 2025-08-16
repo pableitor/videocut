@@ -1,0 +1,18 @@
+version 3
+Para correr necesita tener node instalado
+
+Install Express if you haven't already. Open a terminal in your project directory and run:
+
+npm init -y
+npm install express
+
+Start the server by running:
+ 
+node server.js
+
+Open your browser and go to: http://localhost:3000 to open the videocut app
+
+Version 4
+Para correr con el servidor python (mas sencillo):
+ 
+python server.py
