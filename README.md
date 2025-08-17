@@ -1,101 +1,101 @@
 # VideoCut (MVP)
 
-Editor de vídeo simple en el navegador con extracción de audio vía FFmpeg.wasm y transcripción local con Whisper (Transformers.js). Incluye exportación rápida por copia de streams y exportación de subtítulos `.srt` con el mismo nombre que el vídeo cargado.
+Simple in-browser video editor using FFmpeg.wasm for audio extraction and local Whisper transcription (Transformers.js). Includes fast export via stream copy and `.srt` subtitle export named after the loaded video.
 
-## Características
+## Features
 
-- **Corte sencillo por timeline** con zoom/scroll y selección de segmentos.
-- **Exportación rápida (sin recodificar)** por copia de streams (si es posible según keyframes).
-- **Transcripción local (Whisper tiny)** ejecutada en el navegador mediante `@xenova/transformers`.
-- **Idioma por defecto: inglés (en)** con fallback a autodetección.
-- **Exportación SRT** usando el **mismo nombre base del vídeo** para máxima compatibilidad con reproductores.
-- **UI fluida**: ejecución de ASR en **Web Worker** y logs ligeros para evitar bloqueos.
+- **Simple timeline editing** with zoom/scroll and segment selection.
+- **Fast export (no re-encode)** via stream copy (when keyframe alignment allows).
+- **Local transcription (Whisper tiny)** in the browser via `@xenova/transformers`.
+- **Default language: English (en)** with fallback to auto-detection.
+- **SRT export** using the **video's base filename** for best player compatibility.
+- **Smooth UI**: ASR runs in a **Web Worker** and logging is lightweight to prevent stalls.
 
 ## Tech stack
 
 - UI: HTML/CSS/JS (no framework)
 - Video/audio: **FFmpeg.wasm**
-  - `@ffmpeg/ffmpeg`: 0.11.6 (recomendado)
-  - `@ffmpeg/core-st`: 0.11.0 (single-threaded para evitar restricciones de SharedArrayBuffer)
-- ASR: **Transformers.js** (`@xenova/transformers`) con modelo `Xenova/whisper-tiny` (cuantizado)
-- Servidor local opcional: `server.js` (Node) o `server.py` (Python) para servir la app con los headers adecuados
+  - `@ffmpeg/ffmpeg`: 0.11.6 (recommended)
+  - `@ffmpeg/core-st`: 0.11.0 (single-threaded to avoid SharedArrayBuffer restrictions)
+- ASR: **Transformers.js** (`@xenova/transformers`) with `Xenova/whisper-tiny` (quantized)
+- Optional local server: `server.js` (Node) or `server.py` (Python) to serve with the right headers
 
-## Estructura
+## Project structure
 
-- `index.html`: UI principal y carga de dependencias (incluye `#exportStatus`).
-- `styles.css`: estilos.
-- `app.js`: lógica de la app (timeline, cortes, export, transcripción, estados UI).
-- `asrWorker.js`: Web Worker para ejecutar Whisper fuera del hilo principal.
-- `server.js` / `server.py`: servidores simples para entorno local.
+- `index.html`: main UI and dependency loading (includes `#exportStatus`).
+- `styles.css`: styles.
+- `app.js`: app logic (timeline, cuts, export, transcription, UI status).
+- `asrWorker.js`: Web Worker to run Whisper off the main thread.
+- `server.js` / `server.py`: simple local servers.
 
-## Requisitos del navegador
+## Browser requirements
 
-Para FFmpeg.wasm y Workers es recomendable servir la app con cabeceras de seguridad:
+For FFmpeg.wasm and Workers, serve the app with security headers:
 - Cross-Origin-Opener-Policy: `same-origin`
 - Cross-Origin-Embedder-Policy: `require-corp`
 
-Estas ya están incluidas en `index.html` via meta tags. Evita abrir por `file://`; usa un servidor local.
+They are already included in `index.html` via meta tags. Avoid `file://`; use a local HTTP server.
 
-## Puesta en marcha
+## Getting started
 
-1) Clona el repo e instala dependencias (si usas Node para el servidor):
+1) Clone the repo and install dependencies (if you use Node as the server):
 
 ```bash
 npm install
 ```
 
-2) Inicia un servidor local. Opciones:
+2) Start a local server. Options:
 
-- Node (recomendado para Windows):
+- Node (recommended on Windows):
 
 ```bash
 node server.js
-# abre http://localhost:3000
+# open http://localhost:3000
 ```
 
 - Python 3:
 
 ```bash
 python server.py
-# abre http://127.0.0.1:8000
+# open http://127.0.0.1:8000
 ```
 
-3) Abre la URL y carga un vídeo (`.mp4`, etc.).
+3) Open the URL and load a video (`.mp4`, etc.).
 
-## Uso
+## Usage
 
-- **Cargar vídeo**: botón "📂 Cargar video".
-- **Cortar**: botón ✂️ en el playhead. Selecciona segmentos y elimina con 🗑️.
-- **Exportación rápida**: "💾 Exportar"; intenta copy stream sin recodificar.
-- **Transcribir**: "🧠 Transcribir"; procesa el audio localmente y muestra subtítulos en overlay.
-- **Exportar SRT**: "📝 Exportar .srt"; el archivo se llamará como el vídeo (p. ej. `mi_video.srt`).
- - **Zoom**: desliza el control "Zoom" o usa `Ctrl + rueda del ratón` sobre el timeline.
- - **Scroll**: desliza el control "Scroll" o usa `Shift + rueda del ratón` sobre el timeline.
- - **Avance/retroceso frame a frame**: haz click en el timeline y pulsa `Ctrl + Flecha Derecha/Izquierda` para mover el playhead 1 frame.
- - **Borrar segmento seleccionado**: pulsa la tecla `Supr/Del`.
- - **Reproducir/Pausar**: usa el botón `▶️/⏸️`.
+- **Load video**: click "📂 Load video".
+- **Cut**: ✂️ at the current playhead. Select segments and delete with 🗑️.
+- **Fast export**: "💾 Export"; attempts stream copy (no re-encode).
+- **Transcribe**: "🧠 Transcribe"; processes audio locally and shows captions overlay.
+- **Export SRT**: "📝 Export .srt"; file name matches the video (e.g., `my_video.srt`).
+ - **Zoom**: move the "Zoom" slider or use `Ctrl + mouse wheel` over the timeline.
+ - **Scroll**: move the "Scroll" slider or use `Shift + mouse wheel` over the timeline.
+ - **Frame-by-frame step**: click the timeline and press `Ctrl + Right/Left Arrow` to move 1 frame.
+ - **Delete selected segment**: press `Delete`.
+ - **Play/Pause**: use the `▶️/⏸️` button.
 
-## Detalles de Transcripción (Whisper)
+## Transcription details (Whisper)
 
-- Modelo: `Xenova/whisper-tiny` (cuantizado) para equilibrio de velocidad/precisión.
-- Flujo: extracción WAV 16kHz mono → decodificación → ASR (en Worker si está disponible).
-- Idioma por defecto: **en**; fallback a autodetección si no hay segmentos.
-- Archivo/funciones relevantes:
-  - `app.js` → `transcribeVideo()` y estado UI (`updateExportStatus`).
-  - `asrWorker.js` para ejecución off-main-thread.
+- Model: `Xenova/whisper-tiny` (quantized) for speed/quality balance.
+- Flow: extract 16kHz mono WAV → decode → ASR (in a Worker when available).
+- Default language: **en**; fallback to auto-detection if no segments.
+- Relevant files/functions:
+  - `app.js` → `transcribeVideo()` and UI status (`updateExportStatus`).
+  - `asrWorker.js` for off-main-thread execution.
 
-## Rendimiento y UI
+## Performance and UI
 
-- Se evita loguear objetos/tensores grandes; se imprime solo el número de segmentos.
-- Antes/después de operaciones pesadas se muestran estados intermedios y se **cede el hilo** (rAF/timeout) para que la UI pinte inmediatamente.
-- Si un Worker no puede cargarse (CORS/MIME), se usa un **fallback en main thread** (puede notarse lag). Usa el servidor local para habilitar Workers.
+- Avoid logging large objects/tensors; only the segment count is logged.
+- Before/after heavy operations, intermediate statuses are shown and the **main thread yields** (rAF/timeout) so the UI can render.
+- If a Worker cannot load (CORS/MIME), a **main-thread fallback** is used (may cause lag). Use the local server to enable Workers.
 
-## Problemas comunes
+## Common issues
 
-- "La página se bloquea tras 100%": asegúrate de servir con `server.js`/`server.py` para permitir Workers y COOP/COEP.
-- Error al crear Worker (MIME/CORS): sirve el repo con un servidor HTTP (no `file://`).
-- `Cannot call unknown function proxy_main`: comprueba versiones compatibles de FFmpeg y la inicialización. Esta app usa `core-st` single-threaded.
+- "Page freezes after 100%": serve with `server.js`/`server.py` to allow Workers and COOP/COEP.
+- Worker creation error (MIME/CORS): serve over HTTP (not `file://`).
+- `Cannot call unknown function proxy_main`: ensure compatible FFmpeg versions and proper init. This app uses single-threaded `core-st`.
 
-## Licencia
+## License
 
 MIT
