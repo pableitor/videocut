@@ -25,6 +25,8 @@
       <button id="knifeBtn" disabled title="Cortar en el playhead actual">✂️ Cortar en playhead</button>
       <button id="deleteBtn" disabled title="Borrar segmento seleccionado">🗑️ Borrar segmento</button>
       <button id="exportBtn" disabled title="Exportación rápida sin recodificar (requiere cortes en keyframes)">💾 Exportar</button>
+      <button id="transcribeBtn" disabled title="Transcribir audio localmente (Whisper tiny en el navegador)">🧠 Transcribir</button>
+      <button id="exportSrtBtn" disabled title="Exportar subtítulos (.srt)">📝 Exportar .srt</button>
 
       <div class="slider-group">
         <label for="zoomRange">Zoom</label>
@@ -41,7 +43,10 @@
     </section>
 
     <section class="viewer">
-      <video id="player" controls preload="metadata"></video>
+      <div class="player-wrap">
+        <video id="player" controls preload="metadata"></video>
+        <div id="captionsOverlay" class="captions-overlay" aria-live="polite"></div>
+      </div>
     </section>
 
     <section class="timeline">
@@ -62,6 +67,18 @@
 
   <!-- Load FFmpeg from CDN -->
   <script src="https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.10.1/dist/ffmpeg.min.js"></script>
+  <!-- Load Transformers (Whisper) for in-browser transcription -->
+  <script type="module">
+    // Lazy create a global ASR pipeline loader using @xenova/transformers
+    // Models are downloaded on first use and cached by the browser
+    import { pipeline } from 'https://cdn.jsdelivr.net/npm/@xenova/transformers@2.15.0/dist/transformers.min.js';
+    window.loadASRPipeline = async () => {
+      if (window.asrPipeline) return window.asrPipeline;
+      // tiny multilingual model; set { quantized: true } to reduce size/compute
+      window.asrPipeline = await pipeline('automatic-speech-recognition', 'Xenova/whisper-tiny', { quantized: true });
+      return window.asrPipeline;
+    };
+  </script>
   <script>
     // FFmpeg configuration and initialization
     const { createFFmpeg, fetchFile } = FFmpeg;

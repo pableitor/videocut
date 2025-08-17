@@ -8,8 +8,11 @@
   const knifeBtn = document.getElementById('knifeBtn');
   const deleteBtn = document.getElementById('deleteBtn');
   const exportBtn = document.getElementById('exportBtn');
+  const transcribeBtn = document.getElementById('transcribeBtn');
+  const exportSrtBtn = document.getElementById('exportSrtBtn');
   const exportStatus = document.getElementById('exportStatus');
   const timeline = document.getElementById('timelineCanvas');
+  const captionsOverlay = document.getElementById('captionsOverlay');
   const curLbl = document.getElementById('currentTime');
   const totLbl = document.getElementById('totalTime');
   const zoomRange = document.getElementById('zoomRange');
@@ -37,6 +40,8 @@
   // Estimación de duración de frame (segundos)
   let frameStepSec = 1 / 30; // fallback
   let lastFrameMediaTime = null;
+  // Subtítulos/transcripción
+  let captions = []; // [{start, end, text}]
 
   function viewportDuration() {
     return editedDuration() / Math.max(zoom, 1e-6);
@@ -61,6 +66,8 @@
     knifeBtn.disabled = !loaded;
     deleteBtn.disabled = !loaded || !selected;
     exportBtn.disabled = !loaded;
+    if (transcribeBtn) transcribeBtn.disabled = !loaded;
+    if (exportSrtBtn) exportSrtBtn.disabled = captions.length === 0;
     zoomRange.disabled = !loaded;
     scrollRange.disabled = !loaded || duration === 0;
   }
@@ -294,6 +301,8 @@
     // Etiquetas de tiempo UI
     curLbl.textContent = fmt(t);
     totLbl.textContent = fmt(editedDuration());
+    // Actualizar overlay de subtítulos
+    updateCaptionOverlayAtTime(t);
 
     // Labels de zoom y scroll
     zoomLabel.textContent = `${zoom.toFixed(1)}x`;
@@ -348,6 +357,7 @@
     }
     // auto-scroll: mantener playhead visible (en tiempo editado)
     followPlayhead();
+    updateCaptionOverlay();
     render();
   });
 
@@ -684,6 +694,142 @@
     return allSegments.filter(seg => seg.keep);
   }
 
+  // ====== Transcripción y subtítulos ======
+  function srtTimestamp(sec) {
+    const s = Math.max(0, Number(sec) || 0);
+    const hh = Math.floor(s / 3600).toString().padStart(2, '0');
+    const mm = Math.floor((s % 3600) / 60).toString().padStart(2, '0');
+    const ss = Math.floor(s % 60).toString().padStart(2, '0');
+    const ms = Math.floor((s - Math.floor(s)) * 1000).toString().padStart(3, '0');
+    return `${hh}:${mm}:${ss},${ms}`;
+  }
+
+  function updateCaptionOverlayAtTime(t) {
+    if (!captionsOverlay) return;
+    const cur = Math.max(0, Math.min(duration || 0, Number(t) || 0));
+    const seg = captions.find(c => cur >= c.start && cur < c.end);
+    captionsOverlay.textContent = seg ? seg.text : '';
+  }
+
+  function updateCaptionOverlay() {
+    const t = Math.min(player.currentTime || 0, duration || 0);
+    updateCaptionOverlayAtTime(t);
+  }
+
+  async function extractAudioWav16k() {
+    // Extrae audio WAV mono 16kHz usando ffmpeg.wasm
+    const ff = await getFFmpeg();
+    updateExportStatus('Extrayendo audio…', 'progress');
+    const resp = await fetch(player.src);
+    const buf = new Uint8Array(await resp.arrayBuffer());
+    ff.FS('writeFile', 'asr_input', buf);
+    await ff.run('-i', 'asr_input', '-vn', '-ac', '1', '-ar', '16000', '-f', 'wav', 'asr.wav');
+    const wav = ff.FS('readFile', 'asr.wav');
+    try { ff.FS('unlink', 'asr_input'); } catch {}
+    try { ff.FS('unlink', 'asr.wav'); } catch {}
+    // Usar el Uint8Array directamente para evitar offsets del ArrayBuffer
+    return new Blob([wav], { type: 'audio/wav' });
+  }
+
+  async function decodeAudioBlobToAudioBuffer(blob) {
+    const arrayBuffer = await blob.arrayBuffer();
+    // Reutilizar AudioContext si existe
+    if (!window._ac) window._ac = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
+    const ac = window._ac;
+    try {
+      const audioBuffer = await ac.decodeAudioData(arrayBuffer.slice(0));
+      return audioBuffer;
+    } catch (e) {
+      console.error('Fallo decodificando WAV para ASR', e);
+      throw e;
+    }
+  }
+
+  function parseASRResult(result) {
+    let segs = [];
+    if (Array.isArray(result?.segments) && result.segments.length) {
+      segs = result.segments
+        .map(s => ({ start: Math.max(0, s.start || 0), end: Math.max(0, s.end || 0), text: (s.text || '').trim() }))
+        .filter(s => s.end > s.start && s.text);
+    } else if (result?.chunks && Array.isArray(result.chunks) && result.chunks.length) {
+      // Algunas versiones devuelven 'chunks'
+      segs = result.chunks
+        .map(s => ({ start: Math.max(0, s.timestamp?.[0] ?? 0), end: Math.max(0, s.timestamp?.[1] ?? 0), text: (s.text || '').trim() }))
+        .filter(s => s.end > s.start && s.text);
+    } else if (result?.text) {
+      segs = [{ start: 0, end: duration || 0, text: (result.text || '').trim() }];
+    }
+    return segs;
+  }
+
+  async function transcribeVideo() {
+    if (!player.src) {
+      updateExportStatus('Carga un video primero', 'error');
+      return;
+    }
+    try {
+      if (transcribeBtn) transcribeBtn.disabled = true;
+      updateExportStatus('Cargando modelo Whisper (primera vez tarda)…', 'progress');
+      const asr = await window.loadASRPipeline();
+      const audioBlob = await extractAudioWav16k();
+      const audioBuffer = await decodeAudioBlobToAudioBuffer(audioBlob);
+      const pcm = audioBuffer.getChannelData(0); // Float32Array mono 16kHz
+      updateExportStatus('Transcribiendo en el navegador…', 'progress');
+      const baseOpts = { return_timestamps: 'segment', chunk_length_s: 30, task: 'transcribe', condition_on_previous_text: false };
+      const tryOrders = [undefined, 'es', 'en'];
+      let result = null, segs = [];
+      // 1) Intento con AudioBuffer y lenguaje auto/es/en
+      for (const lang of tryOrders) {
+        const opts = { ...baseOpts, language: lang };
+        result = await asr(pcm, opts);
+        console.log('ASR result (Float32Array PCM, lang=', lang, '):', result);
+        segs = parseASRResult(result);
+        if (segs.length) break;
+      }
+      // 2) Intento alternativo con Blob si sigue vacío
+      if (!segs.length) {
+        const audioBlob2 = await extractAudioWav16k();
+        const audioBuffer2 = await decodeAudioBlobToAudioBuffer(audioBlob2);
+        const pcm2 = audioBuffer2.getChannelData(0);
+        for (const lang of tryOrders) {
+          const opts = { ...baseOpts, language: lang };
+          result = await asr(pcm2, opts);
+          console.log('ASR result (Float32Array PCM fallback, lang=', lang, '):', result);
+          segs = parseASRResult(result);
+          if (segs.length) break;
+        }
+      }
+      captions = segs;
+      updateCaptionOverlay();
+      if (exportSrtBtn) exportSrtBtn.disabled = captions.length === 0;
+      updateExportStatus(captions.length ? `Transcripción lista (${captions.length} segmentos)` : 'No se detectó texto', captions.length ? 'success' : 'error');
+    } catch (e) {
+      console.error(e);
+      updateExportStatus(`Error transcribiendo: ${e.message || e}`, 'error');
+    } finally {
+      if (transcribeBtn) transcribeBtn.disabled = false;
+    }
+  }
+
+  function exportSrt() {
+    if (!captions.length) return;
+    const lines = [];
+    captions.forEach((c, i) => {
+      lines.push(String(i + 1));
+      lines.push(`${srtTimestamp(c.start)} --> ${srtTimestamp(c.end)}`);
+      lines.push(c.text);
+      lines.push('');
+    });
+    const blob = new Blob([lines.join('\r\n')], { type: 'text/plain;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `transcripcion_${new Date().toISOString().slice(0,10)}.srt`;
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(() => { document.body.removeChild(a); URL.revokeObjectURL(url); }, 100);
+  }
+
   // Fast export without re-encoding (stream copy)
   async function exportFastVideo() {
     if (!player.src || player.readyState === 0) {
@@ -772,11 +918,22 @@
   document.addEventListener('DOMContentLoaded', () => {
     // Preload FFmpeg when the page loads
     getFFmpeg().catch(console.error);
-  
+
     // Export button click handler (fast export)
     exportBtn?.addEventListener('click', () => {
       exportBtn.disabled = true;
       exportFastVideo().finally(() => { exportBtn.disabled = false; });
     });
+
+    // Transcribir
+    transcribeBtn?.addEventListener('click', () => {
+      transcribeVideo().catch(console.error);
+    });
+
+    // Exportar SRT
+    exportSrtBtn?.addEventListener('click', () => {
+      exportSrt();
+    });
   });
+
 })();
