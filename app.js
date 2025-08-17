@@ -25,6 +25,9 @@
   let cuts = []; // segundos (excluye 0 y duration)
   let removed = []; // [{start,end}] rangos eliminados
   let selected = null; // {start,end} segmento seleccionado
+  // Nombre de archivo actual (para exportar SRT con el mismo nombre)
+  let currentFileName = '';
+  let currentFileBase = '';
 
   // Viewport del timeline (para zoom/scroll)
   let zoom = 1; // 1..12 (escala de la duración EDITADA)
@@ -35,6 +38,61 @@
   let draggingCutIndex = -1;
   let dragStartCanvasX = 0;
   let suppressNextClick = false; // para evitar selección tras drag
+
+  // ASR en Web Worker (si está disponible) para evitar bloquear la UI
+  let asrWorker = null;
+  let asrReqId = 1;
+  const asrPending = new Map();
+  function initASRWorker() {
+    if (asrWorker) return asrWorker;
+    try {
+      asrWorker = new Worker('asrWorker.js', { type: 'module' });
+      asrWorker.onmessage = (ev) => {
+        const { id, ok, type, payload, error } = ev.data || {};
+        const p = asrPending.get(id);
+        if (!p) return;
+        asrPending.delete(id);
+        if (ok) p.resolve({ type, payload }); else p.reject(new Error(error || 'ASR worker error'));
+      };
+      // Lanzar init en background
+      const initId = asrReqId++;
+      asrPending.set(initId, { resolve: () => {}, reject: () => {} });
+      asrWorker.postMessage({ id: initId, type: 'init' });
+    } catch (e) {
+      console.warn('No se pudo iniciar asrWorker, se usará fallback en main thread', e);
+      asrWorker = null;
+    }
+    return asrWorker;
+  }
+
+  async function asrTranscribeWorker(pcm, opts) {
+    initASRWorker();
+    if (!asrWorker) throw new Error('ASR worker no disponible');
+    const id = asrReqId++;
+    const promise = new Promise((resolve, reject) => {
+      asrPending.set(id, { resolve, reject });
+    });
+    // Enviar copia del buffer para no bloquear el hilo principal
+    const payload = { pcm, opts };
+    asrWorker.postMessage({ id, type: 'transcribe', payload });
+    const res = await promise;
+    return res?.payload?.segments || [];
+  }
+
+  async function asrTranscribeFallback(pcm, opts) {
+    const asr = await window.loadASRPipeline();
+    const result = await asr(pcm, opts);
+    return parseASRResult(result);
+  }
+
+  async function asrTranscribeSafe(pcm, opts) {
+    try {
+      const segs = await asrTranscribeWorker(pcm, opts);
+      return segs;
+    } catch (_) {
+      return await asrTranscribeFallback(pcm, opts);
+    }
+  }
   const DRAG_TOL_PX = 8; // tolerancia para enganchar un corte
   const MIN_GAP = 0.02; // separación mínima entre cortes (s)
   // Estimación de duración de frame (segundos)
@@ -324,6 +382,8 @@
   fileInput.addEventListener('change', () => {
     const f = fileInput.files && fileInput.files[0];
     if (!f) return;
+    currentFileName = f.name || '';
+    currentFileBase = currentFileName.replace(/\.[^/.]+$/, '');
     const url = URL.createObjectURL(f);
     player.src = url;
     player.load();
@@ -724,6 +784,12 @@
     const buf = new Uint8Array(await resp.arrayBuffer());
     ff.FS('writeFile', 'asr_input', buf);
     await ff.run('-i', 'asr_input', '-vn', '-ac', '1', '-ar', '16000', '-f', 'wav', 'asr.wav');
+    // FFmpeg ha terminado (progress 100%). Antes de leer el archivo (operación sincrónica y pesada),
+    // muestra estado intermedio y cede el hilo para que la UI pinte.
+    updateExportStatus('Procesando resultados…', 'progress');
+    try { void exportStatus?.offsetHeight; } catch {}
+    await new Promise(requestAnimationFrame);
+    await new Promise((r) => setTimeout(r, 50));
     const wav = ff.FS('readFile', 'asr.wav');
     try { ff.FS('unlink', 'asr_input'); } catch {}
     try { ff.FS('unlink', 'asr.wav'); } catch {}
@@ -770,20 +836,36 @@
     try {
       if (transcribeBtn) transcribeBtn.disabled = true;
       updateExportStatus('Cargando modelo Whisper (primera vez tarda)…', 'progress');
-      const asr = await window.loadASRPipeline();
+      // Preparar ASR (por worker si es posible)
+      initASRWorker();
       const audioBlob = await extractAudioWav16k();
       const audioBuffer = await decodeAudioBlobToAudioBuffer(audioBlob);
       const pcm = audioBuffer.getChannelData(0); // Float32Array mono 16kHz
       updateExportStatus('Transcribiendo en el navegador…', 'progress');
+      // Dar tiempo a que el navegador pinte este estado justo después del 100% de FFmpeg
+      try { void exportStatus?.offsetHeight; } catch {}
+      await new Promise(requestAnimationFrame);
+      await new Promise((r) => setTimeout(r, 50));
       const baseOpts = { return_timestamps: 'segment', chunk_length_s: 30, task: 'transcribe', condition_on_previous_text: false };
-      const tryOrders = [undefined, 'es', 'en'];
+      // Prioriza inglés por defecto, luego autodetección si no hay resultados
+      const tryOrders = ['en', undefined];
       let result = null, segs = [];
+      let processingShown = false;
       // 1) Intento con AudioBuffer y lenguaje auto/es/en
       for (const lang of tryOrders) {
         const opts = { ...baseOpts, language: lang };
-        result = await asr(pcm, opts);
-        console.log('ASR result (Float32Array PCM, lang=', lang, '):', result);
-        segs = parseASRResult(result);
+        // Ejecutar ASR fuera del hilo principal si es posible
+        segs = await asrTranscribeSafe(pcm, opts);
+        // Mostrar estado intermedio ANTES de parsear resultados (puede ser costoso)
+        if (!processingShown) {
+          updateExportStatus('Procesando resultados…', 'progress');
+          // Forzar reflow para asegurar pintado inmediato del nuevo texto
+          try { void exportStatus?.offsetHeight; } catch {}
+          await new Promise(requestAnimationFrame);
+          await new Promise((r) => setTimeout(r, 50));
+          processingShown = true;
+        }
+        console.log('ASR done (pcm) lang=', lang, 'segments=', Array.isArray(segs) ? segs.length : 0);
         if (segs.length) break;
       }
       // 2) Intento alternativo con Blob si sigue vacío
@@ -793,9 +875,16 @@
         const pcm2 = audioBuffer2.getChannelData(0);
         for (const lang of tryOrders) {
           const opts = { ...baseOpts, language: lang };
-          result = await asr(pcm2, opts);
-          console.log('ASR result (Float32Array PCM fallback, lang=', lang, '):', result);
-          segs = parseASRResult(result);
+          const segs2 = await asrTranscribeSafe(pcm2, opts);
+          if (!processingShown) {
+            updateExportStatus('Procesando resultados…', 'progress');
+            try { void exportStatus?.offsetHeight; } catch {}
+            await new Promise(requestAnimationFrame);
+            await new Promise((r) => setTimeout(r, 50));
+            processingShown = true;
+          }
+          console.log('ASR done (pcm2) fallback lang=', lang, 'segments=', Array.isArray(segs2) ? segs2.length : 0);
+          segs = segs2;
           if (segs.length) break;
         }
       }
@@ -824,7 +913,8 @@
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `transcripcion_${new Date().toISOString().slice(0,10)}.srt`;
+    const base = currentFileBase || `transcripcion_${new Date().toISOString().slice(0,10)}`;
+    a.download = `${base}.srt`;
     document.body.appendChild(a);
     a.click();
     setTimeout(() => { document.body.removeChild(a); URL.revokeObjectURL(url); }, 100);
