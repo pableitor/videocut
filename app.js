@@ -34,6 +34,9 @@
   let suppressNextClick = false; // para evitar selección tras drag
   const DRAG_TOL_PX = 8; // tolerancia para enganchar un corte
   const MIN_GAP = 0.02; // separación mínima entre cortes (s)
+  // Estimación de duración de frame (segundos)
+  let frameStepSec = 1 / 30; // fallback
+  let lastFrameMediaTime = null;
 
   function viewportDuration() {
     return editedDuration() / Math.max(zoom, 1e-6);
@@ -271,7 +274,7 @@
       if (isInRemoved(c)) continue; // cortes dentro de eliminado no aparecen
       const x = Math.round(timeToX(c)) + 0.5;
       ctx.strokeStyle = '#4da3ff';
-      ctx.lineWidth = 2;
+      ctx.lineWidth = 3;
       ctx.beginPath();
       ctx.moveTo(x, padTop);
       ctx.lineTo(x, h - padBottom);
@@ -365,6 +368,25 @@
 
   deleteBtn.addEventListener('click', deleteSelected);
 
+  // Atajo de teclado: tecla Supr/DEL borra el segmento seleccionado
+  document.addEventListener('keydown', (ev) => {
+    // Evitar interferir cuando se escribe en inputs de texto/textarea
+    const target = ev.target;
+    const isTyping = (target && (
+      (target.tagName === 'INPUT' && target.type === 'text') ||
+      target.tagName === 'TEXTAREA' ||
+      target.isContentEditable === true
+    ));
+    if (isTyping) return;
+
+    if (ev.key === 'Delete' || ev.key === 'Del' || ev.keyCode === 46) {
+      if (!deleteBtn.disabled) {
+        ev.preventDefault();
+        deleteSelected();
+      }
+    }
+  });
+
   // Interacción con el timeline
   timeline.addEventListener('mousedown', (ev) => {
     if (!duration) return;
@@ -452,6 +474,68 @@
     const maxStart = Math.max(0, editedDuration() - vd);
     viewportStart = (pct / 100) * maxStart;
     clampViewport();
+    render();
+  });
+
+  // Zoom/Scroll con rueda del ratón + modificadores en el timeline
+  // - Ctrl + rueda: zoom (centra en la posición del cursor)
+  // - Shift + rueda: scroll horizontal
+  timeline.addEventListener('wheel', (ev) => {
+    // Sólo actuamos con modificadores para no interferir con el scroll normal de la página
+    if (!ev.ctrlKey && !ev.shiftKey) return;
+    ev.preventDefault();
+
+    const rect = timeline.getBoundingClientRect();
+
+    if (ev.ctrlKey) {
+      // Zoom suave basado en deltaY
+      const oldZoom = zoom;
+      const zoomFactor = ev.deltaY < 0 ? 1.1 : 0.9; // rueda arriba = acercar
+      zoom = Math.max(1, Math.min(12, zoom * zoomFactor));
+
+      // Mantener la posición bajo el cursor estable (en tiempo editado)
+      const sAtPointer = xToTime(ev.clientX);
+      const eAtPointer = sourceToEdited(sAtPointer);
+      const vdNew = viewportDuration();
+      // Posición relativa del cursor en el canvas (0..1)
+      const rel = Math.max(0, Math.min(1, (ev.clientX - rect.left) / Math.max(rect.width, 1)));
+      viewportStart = eAtPointer - rel * vdNew;
+      clampViewport();
+
+      // Actualizar UI
+      zoomRange.value = String(zoom);
+      updateScrollRangeFromViewport();
+      render();
+      return;
+    }
+
+    if (ev.shiftKey) {
+      // Scroll horizontal proporcional al tamaño del viewport
+      const dir = ev.deltaY > 0 ? 1 : -1;
+      const delta = dir * viewportDuration() * 0.1; // desplaza 10% del viewport
+      viewportStart = viewportStart + delta;
+      clampViewport();
+      updateScrollRangeFromViewport();
+      render();
+      return;
+    }
+  }, { passive: false });
+
+  // Atajos de teclado: Ctrl + ←/→ para moverse frame a frame
+  document.addEventListener('keydown', (ev) => {
+    if (!player || !duration) return;
+    if (!ev.ctrlKey) return;
+    if (ev.key !== 'ArrowLeft' && ev.key !== 'ArrowRight') return;
+    ev.preventDefault();
+    // Pausar para stepping preciso
+    if (!player.paused) player.pause();
+    const step = frameStepSec || (1 / 30);
+    let t = player.currentTime || 0;
+    t += (ev.key === 'ArrowRight' ? step : -step);
+    t = Math.max(0, Math.min(duration, t));
+    player.currentTime = t;
+    // Mantener playhead visible
+    followPlayhead();
     render();
   });
 
@@ -574,127 +658,99 @@
     return ffmpegLoadPromise;
   }
 
-  // Export function
-  async function exportVideo() {
+  // (Eliminado) exportVideo (CPU/wasm) – se consolida en exportFastVideo
+
+  // Compute kept segments based on cuts and removed ranges
+  function computeSegmentsToKeep() {
+    const allSegments = [];
+    const sortedCuts = [...cuts].sort((a, b) => a - b);
+    let currentStart = 0;
+    for (const cut of sortedCuts) {
+      if (cut > currentStart) {
+        allSegments.push({ start: currentStart, end: cut, keep: true });
+      }
+      currentStart = cut;
+    }
+    if (currentStart < player.duration) {
+      allSegments.push({ start: currentStart, end: player.duration, keep: true });
+    }
+    for (const removedSeg of removed) {
+      for (const seg of allSegments) {
+        if (seg.start >= removedSeg.start && seg.end <= removedSeg.end) {
+          seg.keep = false;
+        }
+      }
+    }
+    return allSegments.filter(seg => seg.keep);
+  }
+
+  // Fast export without re-encoding (stream copy)
+  async function exportFastVideo() {
     if (!player.src || player.readyState === 0) {
       updateExportStatus('Error: No hay video cargado', 'error');
       return;
     }
-
     try {
-      updateExportStatus('Preparando exportación...', 'progress');
-      
-      // Get FFmpeg instance
+      updateExportStatus('Exportación rápida: preparando...', 'progress');
       const ffmpeg = await getFFmpeg();
-      
-      // Get all segments (both kept and removed)
-      const allSegments = [];
-      const sortedCuts = [...cuts].sort((a, b) => a - b);
-      
-      // Create all segments from cuts
-      let currentStart = 0;
-      for (const cut of sortedCuts) {
-        if (cut > currentStart) {
-          allSegments.push({ 
-            start: currentStart, 
-            end: cut,
-            keep: true // Default to keeping segments
-          });
-        }
-        currentStart = cut;
-      }
-      
-      // Add the last segment
-      if (currentStart < player.duration) {
-        allSegments.push({ 
-          start: currentStart, 
-          end: player.duration,
-          keep: true
-        });
-      }
-      
-      // Mark removed segments
-      for (const removedSeg of removed) {
-        for (const seg of allSegments) {
-          if (seg.start >= removedSeg.start && seg.end <= removedSeg.end) {
-            seg.keep = false;
-          }
-        }
-      }
-      
-      // Filter to keep only the segments we want
-      const segmentsToKeep = allSegments.filter(seg => seg.keep);
-      
-      if (segmentsToKeep.length === 0) {
-        throw new Error('No hay segmentos para exportar');
-      }
 
-      updateExportStatus('Procesando video... (esto puede tardar varios minutos)', 'progress');
-      
-      // Fetch the video file
+      const segmentsToKeep = computeSegmentsToKeep();
+      if (segmentsToKeep.length === 0) throw new Error('No hay segmentos para exportar');
+
+      // Fetch and write input
       const response = await fetch(player.src);
       const videoData = await response.arrayBuffer();
-      
-      // Write the input file
       ffmpeg.FS('writeFile', 'input.mp4', new Uint8Array(videoData));
-      
-      // Build the filter complex for cutting and concatenating
-      let filterComplex = '';
-      const inputSegments = [];
-      
-      // For each segment to keep, create trim filters
-      segmentsToKeep.forEach((seg, i) => {
-        filterComplex += `[0:v]trim=start=${seg.start}:end=${seg.end},setpts=PTS-STARTPTS[v${i}];`;
-        filterComplex += `[0:a]atrim=start=${seg.start}:end=${seg.end},asetpts=PTS-STARTPTS[a${i}];`;
-        inputSegments.push(`[v${i}][a${i}]`);
-      });
-      
-      // Concatenate all segments
-      filterComplex += `${inputSegments.join('')}concat=n=${segmentsToKeep.length}:v=1:a=1[outv][outa]`;
-      
-      // Run FFmpeg with the filter complex
+
+      // Extract each segment with stream copy
+      for (let i = 0; i < segmentsToKeep.length; i++) {
+        const seg = segmentsToKeep[i];
+        const outName = `seg_${i}.mp4`;
+        await ffmpeg.run(
+          '-ss', String(seg.start),
+          '-to', String(seg.end),
+          '-i', 'input.mp4',
+          '-c', 'copy',
+          outName
+        );
+      }
+
+      // Create concat list file
+      let listTxt = '';
+      for (let i = 0; i < segmentsToKeep.length; i++) {
+        listTxt += `file seg_${i}.mp4\n`;
+      }
+      ffmpeg.FS('writeFile', 'list.txt', new TextEncoder().encode(listTxt));
+
+      // Concat without re-encoding
       await ffmpeg.run(
-        '-i', 'input.mp4',
-        '-filter_complex', filterComplex,
-        '-map', '[outv]',
-        '-map', '[outa]',
-        '-c:v', 'libx264',
-        '-c:a', 'aac',
-        '-preset', 'ultrafast',
-        '-crf', '28',
-        '-movflags', '+faststart',
-        'output.mp4'
+        '-f', 'concat',
+        '-safe', '0',
+        '-i', 'list.txt',
+        '-c', 'copy',
+        'output_fast.mp4'
       );
-      
-      // Get the result
-      const data = ffmpeg.FS('readFile', 'output.mp4');
-      
-      // Create download link
+
+      const data = ffmpeg.FS('readFile', 'output_fast.mp4');
       const blob = new Blob([data.buffer], { type: 'video/mp4' });
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = `video_editado_${new Date().toISOString().slice(0, 10)}.mp4`;
+      a.download = `video_rapido_${new Date().toISOString().slice(0, 10)}.mp4`;
       document.body.appendChild(a);
       a.click();
-      
-      // Cleanup
       setTimeout(() => {
         document.body.removeChild(a);
         URL.revokeObjectURL(url);
-        ffmpeg.FS('unlink', 'input.mp4');
-        ffmpeg.FS('unlink', 'output.mp4');
       }, 100);
-      
-      updateExportStatus('¡Exportación completada con éxito!', 'success');
-      
-    } catch (error) {
-      console.error('Error al exportar el video:', error);
-      updateExportStatus(`Error: ${error.message}`, 'error');
-    } finally {
-      exportBtn.disabled = false;
+      updateExportStatus('Exportación rápida completada', 'success');
+    } catch (err) {
+      console.error(err);
+      updateExportStatus(`Rápido: ${err.message}`, 'error');
     }
   }
+
+  // (Eliminado) exportNvenc – ya no se usa
 
   // Update status function
   function updateExportStatus(message, type = 'info') {
@@ -717,10 +773,10 @@
     // Preload FFmpeg when the page loads
     getFFmpeg().catch(console.error);
   
-    // Export button click handler
+    // Export button click handler (fast export)
     exportBtn?.addEventListener('click', () => {
       exportBtn.disabled = true;
-      exportVideo().catch(console.error);
+      exportFastVideo().finally(() => { exportBtn.disabled = false; });
     });
   });
 })();
