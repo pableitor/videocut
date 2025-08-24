@@ -65,13 +65,13 @@ python server.py
 ## Usage
 
 - **Load video**: click "📂 Load video".
-- **Cut**: ✂️ at the current playhead. Select segments and delete with 🗑️.
+- **Cut**: ✂️ at the current playhead. Select segments with the mouse and delete with 🗑️ or DEL.
 - **Fast export**: "💾 Export"; attempts stream copy (no re-encode).
 - **Transcribe**: "🧠 Transcribe"; processes audio locally and shows captions overlay.
 - **Export SRT**: "📝 Export .srt"; file name matches the video (e.g., `my_video.srt`).
  - **Zoom**: move the "Zoom" slider or use `Ctrl + mouse wheel` over the timeline.
  - **Scroll**: move the "Scroll" slider or use `Shift + mouse wheel` over the timeline.
- - **Frame-by-frame step**: click the timeline and press `Ctrl + Right/Left Arrow` to move 1 frame.
+ - **Frame-by-frame step**: click the timeline and press `Ctrl + Right/Left Arrow` to move 1 frame FWD / BWD.
  - **Delete selected segment**: press `Delete`.
  - **Play/Pause**: use the `▶️/⏸️` button.
 
